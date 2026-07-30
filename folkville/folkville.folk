@@ -255,7 +255,12 @@ proc ::folkville::histSpread {hist} {
         if {$y < $yMin} { set yMin $y }
         if {$y > $yMax} { set yMax $y }
     }
-    expr {max($xMax - $xMin, $yMax - $yMin)}
+    # No max() in Jim Tcl's expr (Folk runs Jim, not tclsh) — calling it throws
+    # and, since this runs inside the engine loop, the throw kills the loop and
+    # freezes the whole world the moment a crane card holds still.
+    set w [expr {$xMax - $xMin}]
+    set h [expr {$yMax - $yMin}]
+    expr {$w > $h ? $w : $h}
 }
 
 proc ::folkville::saveSnapshot {path terrain houses rev} {
@@ -393,7 +398,7 @@ When the folkville crane dwell is /frac/ at /pos/ &\
 while true {
     set dispResults [Query! display /disp/ has width /dw/ height /dh/]
     if {[llength $dispResults] > 0} { break }
-    exec sleep 0.5
+    sleep 0.5
 }
 set d [lindex $dispResults 0]
 set DW [dict get $d dw]
@@ -414,7 +419,10 @@ if {$terrain eq ""} {
 
 # Publish the scene: derived, render-ready data — consumers need no game code.
 proc holdScene {} {
-    global terrain houses COLS ROWS OX OY CELL rev
+    # A Folk program body is NOT the global scope — its variables are locals
+    # of the body, so reach up one frame instead of using `global`.
+    upvar 1 terrain terrain houses houses rev rev \
+            COLS COLS ROWS ROWS OX OX OY OY CELL CELL
     set roads [::folkville::runsOf $terrain R $COLS $ROWS]
     set trees [::folkville::cellsOf $terrain T $COLS $ROWS]
     set stats [::folkville::stats $terrain $houses]
@@ -548,5 +556,5 @@ while true {
         set lastSave $now
     }
 
-    exec sleep $TICK_S
+    sleep $TICK_S
 }
