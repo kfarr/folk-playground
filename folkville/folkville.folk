@@ -1,0 +1,552 @@
+# folkville.folk — a tabletop SimCity for Folk Computer. Self-contained: this
+# one file is the whole game. See SPEC-folkville.md. Companion programs are
+# just the printable tool cards (folkville-bulldozer.folk etc.).
+#
+# Architecture: the engine loop at the bottom is the single writer of game
+# state. It publishes a RENDER-READY scene claim (merged road runs, tree
+# cells, house anchors, stats) — data, not code — so the renderer and every
+# other consumer is a plain drawing loop over lists, with no shared library.
+#
+# Layout (order matters — the engine loop never returns, so all When handlers
+# must be registered first):
+#   1. config
+#   2. game-logic procs (used only by the engine, same interpreter)
+#   3. renderer   (When the folkville scene is …)
+#   4. tool auras (When /p/ is a folkville tool …)
+#   5. dwell ring (When the folkville crane dwell is …)
+#   6. engine     (while true … — MUST STAY LAST)
+
+# ----------------------------------------------------------------- config ---
+
+set CELL   20      ;# px per cell
+set MARGIN 40      ;# px kept clear around the play area
+set TICK_S 0.05    ;# engine period (20 Hz)
+
+set DOZER_RADIUS 1.5   ;# cells
+set PAVER_RADIUS 1.0
+set TRAIL_MAX_MS  500  ;# gap larger than this = teleport, no stroke
+set DWELL_MS     1800  ;# crane hold-still time
+set DWELL_SPREAD  0.8  ;# cells
+set RESET_MS     3000
+
+Wish $this is labelled "FOLKVILLE\nengine + renderer"
+
+# ------------------------------------------------------------- game logic ---
+# Pure Tcl, engine-only. Terrain is one char per cell, row-major:
+# G grass, T tree, R road, H house-occupied. Houses are {col row} 2x2 anchors.
+
+namespace eval ::folkville {}
+
+proc ::folkville::initTerrain {cols rows} {
+    # Deterministic tree scatter (~7%): stable across re-runs by design —
+    # Folk re-executes programs on every edit, so no RNG allowed here.
+    set t ""
+    for {set r 0} {$r < $rows} {incr r} {
+        for {set c 0} {$c < $cols} {incr c} {
+            if {((($c * 73856093) ^ ($r * 19349663)) % 15) == 0} {
+                append t "T"
+            } else {
+                append t "G"
+            }
+        }
+    }
+    return $t
+}
+
+proc ::folkville::cellAt {terrain c r cols} {
+    string index $terrain [expr {$r * $cols + $c}]
+}
+
+proc ::folkville::setCell {terrain c r cols ch} {
+    set i [expr {$r * $cols + $c}]
+    string replace $terrain $i $i $ch
+}
+
+# Cells whose center lies within `radius` (cell units) of (cx, cy)
+# (fractional cell coordinates). Clipped to the grid.
+proc ::folkville::brushCells {cx cy radius cols rows} {
+    set out {}
+    set r2 [expr {$radius * $radius}]
+    set cMin [expr {int(floor($cx - $radius))}]
+    set cMax [expr {int(ceil($cx + $radius))}]
+    set rMin [expr {int(floor($cy - $radius))}]
+    set rMax [expr {int(ceil($cy + $radius))}]
+    if {$cMin < 0} { set cMin 0 }
+    if {$rMin < 0} { set rMin 0 }
+    if {$cMax >= $cols} { set cMax [expr {$cols - 1}] }
+    if {$rMax >= $rows} { set rMax [expr {$rows - 1}] }
+    for {set r $rMin} {$r <= $rMax} {incr r} {
+        for {set c $cMin} {$c <= $cMax} {incr c} {
+            set dx [expr {$c + 0.5 - $cx}]
+            set dy [expr {$r + 0.5 - $cy}]
+            if {$dx*$dx + $dy*$dy <= $r2} {
+                lappend out [list $c $r]
+            }
+        }
+    }
+    return $out
+}
+
+# Continuous stroke from (x0,y0) to (x1,y1) in cell coordinates: brushes
+# stamped every half-radius along the segment, deduplicated. No dotted roads.
+proc ::folkville::strokeCells {x0 y0 x1 y1 radius cols rows} {
+    set dx [expr {$x1 - $x0}]
+    set dy [expr {$y1 - $y0}]
+    set dist [expr {hypot($dx, $dy)}]
+    set steps [expr {int(ceil($dist / ($radius * 0.5)))}]
+    if {$steps < 1} { set steps 1 }
+    set seen [dict create]
+    for {set i 0} {$i <= $steps} {incr i} {
+        set f [expr {double($i) / $steps}]
+        set px [expr {$x0 + $dx * $f}]
+        set py [expr {$y0 + $dy * $f}]
+        foreach cell [brushCells $px $py $radius $cols $rows] {
+            dict set seen $cell 1
+        }
+    }
+    return [dict keys $seen]
+}
+
+# Bulldozer: every touched cell -> G. Touching any cell of a house demolishes
+# the whole house. Returns number of cells changed.
+proc ::folkville::bulldoze {terrainVar housesVar cells cols} {
+    upvar 1 $terrainVar terrain $housesVar houses
+    set changed 0
+    foreach cell $cells {
+        lassign $cell c r
+        set ch [cellAt $terrain $c $r $cols]
+        if {$ch eq "H"} {
+            incr changed [demolishHouseAt terrain houses $c $r $cols]
+        } elseif {$ch ne "G"} {
+            set terrain [setCell $terrain $c $r $cols "G"]
+            incr changed
+        }
+    }
+    return $changed
+}
+
+proc ::folkville::demolishHouseAt {terrainVar housesVar c r cols} {
+    upvar 1 $terrainVar terrain $housesVar houses
+    set i 0
+    foreach h $houses {
+        lassign $h ac ar
+        if {$c >= $ac && $c <= $ac + 1 && $r >= $ar && $r <= $ar + 1} {
+            set houses [lreplace $houses $i $i]
+            foreach {dc dr} {0 0  1 0  0 1  1 1} {
+                set terrain [setCell $terrain [expr {$ac + $dc}] [expr {$ar + $dr}] $cols "G"]
+            }
+            return 4
+        }
+        incr i
+    }
+    return 0
+}
+
+# Paver: grass only. Trees and houses are immune — bulldoze first.
+proc ::folkville::pave {terrainVar cells cols} {
+    upvar 1 $terrainVar terrain
+    set changed 0
+    foreach cell $cells {
+        lassign $cell c r
+        if {[cellAt $terrain $c $r $cols] eq "G"} {
+            set terrain [setCell $terrain $c $r $cols "R"]
+            incr changed
+        }
+    }
+    return $changed
+}
+
+# Crane: 2x2 house with top-left anchor (c, r). All four cells must be grass
+# and inside the grid. Returns 1 on success.
+proc ::folkville::tryPlaceHouse {terrainVar housesVar c r cols rows} {
+    upvar 1 $terrainVar terrain $housesVar houses
+    if {$c < 0 || $r < 0 || $c + 1 >= $cols || $r + 1 >= $rows} { return 0 }
+    foreach {dc dr} {0 0  1 0  0 1  1 1} {
+        if {[cellAt $terrain [expr {$c + $dc}] [expr {$r + $dr}] $cols] ne "G"} {
+            return 0
+        }
+    }
+    foreach {dc dr} {0 0  1 0  0 1  1 1} {
+        set terrain [setCell $terrain [expr {$c + $dc}] [expr {$r + $dr}] $cols "H"]
+    }
+    lappend houses [list $c $r]
+    return 1
+}
+
+# Merged horizontal runs of character `ch`: list of {row colStart colEnd}.
+# Keeps the scene claim (and the renderer's wish count) small.
+proc ::folkville::runsOf {terrain ch cols rows} {
+    set runs {}
+    for {set r 0} {$r < $rows} {incr r} {
+        set c 0
+        while {$c < $cols} {
+            if {[cellAt $terrain $c $r $cols] eq $ch} {
+                set start $c
+                while {$c < $cols && [cellAt $terrain $c $r $cols] eq $ch} {
+                    incr c
+                }
+                lappend runs [list $r $start [expr {$c - 1}]]
+            } else {
+                incr c
+            }
+        }
+    }
+    return $runs
+}
+
+proc ::folkville::cellsOf {terrain ch cols rows} {
+    set out {}
+    set i 0
+    set len [string length $terrain]
+    while {$i < $len} {
+        set j [string first $ch $terrain $i]
+        if {$j < 0} { break }
+        lappend out [list [expr {$j % $cols}] [expr {$j / $cols}]]
+        set i [expr {$j + 1}]
+    }
+    return $out
+}
+
+proc ::folkville::stats {terrain houses} {
+    set trees [expr {[string length $terrain] - [string length [string map {T ""} $terrain]]}]
+    set road  [expr {[string length $terrain] - [string length [string map {R ""} $terrain]]}]
+    return "trees $trees   houses [llength $houses]   road $road cells"
+}
+
+# Folk quads are {space {topLeft topRight bottomRight bottomLeft}} with
+# {x y z} vertices (see folk quad-lib). We only need x/y.
+proc ::folkville::quadCenter {q} {
+    set verts [lindex $q 1]
+    set sx 0.0; set sy 0.0
+    foreach v $verts {
+        set sx [expr {$sx + [lindex $v 0]}]
+        set sy [expr {$sy + [lindex $v 1]}]
+    }
+    list [expr {$sx / 4.0}] [expr {$sy / 4.0}]
+}
+
+# Unit vector from the quad's bottom edge toward its top edge — the direction
+# the physical card is "facing".
+proc ::folkville::quadUp {q} {
+    set verts [lindex $q 1]
+    lassign $verts tl tr br bl
+    set tx [expr {([lindex $tl 0] + [lindex $tr 0]) / 2.0}]
+    set ty [expr {([lindex $tl 1] + [lindex $tr 1]) / 2.0}]
+    set bx [expr {([lindex $bl 0] + [lindex $br 0]) / 2.0}]
+    set by [expr {([lindex $bl 1] + [lindex $br 1]) / 2.0}]
+    set dx [expr {$tx - $bx}]
+    set dy [expr {$ty - $by}]
+    set n [expr {hypot($dx, $dy)}]
+    if {$n < 1e-9} { return {0.0 -1.0} }
+    list [expr {$dx / $n}] [expr {$dy / $n}]
+}
+
+# Bounding-box spread (max extent either axis, cell units) of a dwell history
+# of {timestampMs x y}. Used for the crane's hold-still test.
+proc ::folkville::histSpread {hist} {
+    if {[llength $hist] == 0} { return 0.0 }
+    set first [lindex $hist 0]
+    set xMin [lindex $first 1]; set xMax $xMin
+    set yMin [lindex $first 2]; set yMax $yMin
+    foreach entry $hist {
+        lassign $entry _ x y
+        if {$x < $xMin} { set xMin $x }
+        if {$x > $xMax} { set xMax $x }
+        if {$y < $yMin} { set yMin $y }
+        if {$y > $yMax} { set yMax $y }
+    }
+    expr {max($xMax - $xMin, $yMax - $yMin)}
+}
+
+proc ::folkville::saveSnapshot {path terrain houses rev} {
+    set fd [open $path w]
+    puts $fd [list $terrain $houses $rev]
+    close $fd
+}
+
+# Returns {terrain houses rev}, or {} if missing/corrupt/wrong grid size.
+proc ::folkville::loadSnapshot {path cols rows} {
+    if {![file exists $path]} { return {} }
+    if {[catch {
+        set fd [open $path r]
+        set data [string trim [read $fd]]
+        close $fd
+        lassign $data terrain houses rev
+    }]} { return {} }
+    if {[string length $terrain] != $cols * $rows} { return {} }
+    if {![string is integer -strict $rev]} { return {} }
+    return [list $terrain $houses $rev]
+}
+
+# --------------------------------------------------------------- renderer ---
+# Pure function of the scene claim. The claim already carries render-ready
+# lists (merged road runs, tree cells, house anchors), so this body needs no
+# game logic at all — it re-fires only when rev changes.
+
+When the folkville scene is rev /rev/ with roads /roads/ trees /trees/ houses /houses/ grid /grid/ origin /origin/ cell /cellPx/ stats /stats/ &\
+     display /disp/ has width /dw/ height /dh/ {
+
+    lassign $grid cols rows
+    lassign $origin ox oy
+    set W [expr {$cols * $cellPx}]
+    set H [expr {$rows * $cellPx}]
+
+    # Filled axis-aligned rect. Primary path: polygon (folk draw/fill.folk).
+    # If your Folk's polygon options differ, set usePolygons 0 to draw rects
+    # as fat lines instead (uses only primitives from folk display-saver.folk).
+    set usePolygons 1
+    proc fvRect {disp x y w h color layer usePolygons} {
+        if {$usePolygons} {
+            set pts [list [list $x $y] \
+                          [list [expr {$x + $w}] $y] \
+                          [list [expr {$x + $w}] [expr {$y + $h}]] \
+                          [list $x [expr {$y + $h}]]]
+            Wish to draw a polygon onto $disp with points $pts color $color layer $layer
+        } else {
+            set yc [expr {$y + $h / 2.0}]
+            Wish to draw a line onto $disp with \
+                points [list [list $x $yc] [list [expr {$x + $w}] $yc]] \
+                width $h color $color
+        }
+    }
+
+    # 1. grass base
+    fvRect $disp $ox $oy $W $H forestgreen 0 $usePolygons
+
+    # 2. roads — one rect per merged horizontal run
+    foreach run $roads {
+        lassign $run r c0 c1
+        fvRect $disp [expr {$ox + $c0 * $cellPx}] [expr {$oy + $r * $cellPx}] \
+            [expr {($c1 - $c0 + 1) * $cellPx}] $cellPx gray 1 $usePolygons
+    }
+
+    # 3. trees
+    foreach cell $trees {
+        lassign $cell c r
+        set x [expr {$ox + ($c + 0.5) * $cellPx}]
+        set y [expr {$oy + ($r + 0.5) * $cellPx}]
+        Wish to draw a circle onto $disp with center [list $x $y] \
+            radius [expr {$cellPx * 0.38}] filled true color darkgreen layer 2
+    }
+
+    # 4. houses (2x2): brown body + red "roof" stripe
+    foreach h $houses {
+        lassign $h c r
+        set x [expr {$ox + $c * $cellPx}]
+        set y [expr {$oy + $r * $cellPx}]
+        fvRect $disp $x $y [expr {2 * $cellPx}] [expr {2 * $cellPx}] saddlebrown 2 $usePolygons
+        fvRect $disp [expr {$x + 3}] [expr {$y + 3}] \
+            [expr {2 * $cellPx - 6}] [expr {$cellPx * 0.7}] firebrick 3 $usePolygons
+    }
+
+    # 5. border + HUD
+    set border [list [list $ox $oy] \
+                     [list [expr {$ox + $W}] $oy] \
+                     [list [expr {$ox + $W}] [expr {$oy + $H}]] \
+                     [list $ox [expr {$oy + $H}]] \
+                     [list $ox $oy]]
+    Wish to draw a line onto $disp with points $border width 3 color white
+    Wish to draw text onto $disp with \
+        x [expr {$ox + 170}] y [expr {$oy + $H + 22}] \
+        text $stats color white scale 22
+}
+
+# -------------------------------------------------------------- tool auras ---
+# Live marker under every tool card so visitors see the table tracking them.
+# Runs at tag rate, independent of scene revs. Self-contained.
+
+When /p/ is a folkville tool with kind /kind/ & /p/ has quad /q/ &\
+     display /disp/ has width /dw/ height /dh/ {
+    set verts [lindex $q 1]
+    set sx 0.0; set sy 0.0
+    foreach v $verts {
+        set sx [expr {$sx + [lindex $v 0]}]
+        set sy [expr {$sy + [lindex $v 1]}]
+    }
+    set cx [expr {$sx / 4.0}]
+    set cy [expr {$sy / 4.0}]
+    set color [dict getdef [dict create \
+        bulldozer yellow paver lightgray crane orange reset red] $kind white]
+    Wish to draw a circle onto $disp with center [list $cx $cy] \
+        radius 42 thickness 4 color $color layer 4
+    Wish to draw text onto $disp with x $cx y [expr {$cy + 62}] \
+        text [string toupper $kind] color $color scale 20
+}
+
+# -------------------------------------------------------------- dwell ring ---
+# The engine refreshes this transient claim while the crane holds still;
+# -keep lets it evaporate the moment the crane moves away.
+
+When the folkville crane dwell is /frac/ at /pos/ &\
+     display /disp/ has width /dw/ height /dh/ {
+    set radius [expr {34.0 - 26.0 * $frac}]
+    Wish to draw a circle onto $disp with center $pos \
+        radius $radius thickness 3 color orange layer 4
+}
+
+# ------------------------------------------------------------------ engine ---
+# fswatch.folk-style long-running loop. Single writer of game state; publishes
+# the render-ready scene claim. EVERYTHING BELOW NEVER RETURNS — add new When
+# handlers above this line.
+
+# wait for the display
+while true {
+    set dispResults [Query! display /disp/ has width /dw/ height /dh/]
+    if {[llength $dispResults] > 0} { break }
+    exec sleep 0.5
+}
+set d [lindex $dispResults 0]
+set DW [dict get $d dw]
+set DH [dict get $d dh]
+
+set COLS [expr {int(($DW - 2 * $MARGIN) / $CELL)}]
+set ROWS [expr {int(($DH - 2 * $MARGIN) / $CELL)}]
+set OX [expr {($DW - $COLS * $CELL) / 2.0}]
+set OY [expr {($DH - $ROWS * $CELL) / 2.0}]
+
+set SNAPSHOT [file join $::env(HOME) folkville-world.snapshot]
+lassign [::folkville::loadSnapshot $SNAPSHOT $COLS $ROWS] terrain houses rev
+if {$terrain eq ""} {
+    set terrain [::folkville::initTerrain $COLS $ROWS]
+    set houses {}
+    set rev 1
+}
+
+# Publish the scene: derived, render-ready data — consumers need no game code.
+proc holdScene {} {
+    global terrain houses COLS ROWS OX OY CELL rev
+    set roads [::folkville::runsOf $terrain R $COLS $ROWS]
+    set trees [::folkville::cellsOf $terrain T $COLS $ROWS]
+    set stats [::folkville::stats $terrain $houses]
+    Hold! -key {folkville scene} \
+        Claim the folkville scene is rev $rev with roads $roads trees $trees \
+            houses $houses grid [list $COLS $ROWS] origin [list $OX $OY] \
+            cell $CELL stats $stats
+}
+holdScene
+
+set toolState [dict create]   ;# per tool page: ema / prev / hist / spent
+set lastSave [clock milliseconds]
+set resetSince 0
+set resetDone 0
+
+while true {
+    set now [clock milliseconds]
+    set changed 0
+    set resetVisible 0
+
+    # HARDWARE NOTE: this join is the one line most likely to need adapting to
+    # your Folk build — compare with how programs on your table join claims to
+    # tag quads (see builtin-programs/tags-to-quads.folk on the Folk machine).
+    set tools [Query! /p/ is a folkville tool with kind /kind/ & /p/ has quad /q/]
+
+    foreach t $tools {
+        set p    [dict get $t p]
+        set kind [dict get $t kind]
+        set q    [dict get $t q]
+        lassign [::folkville::quadCenter $q] x y
+
+        set st [dict getdef $toolState $p [dict create]]
+
+        # EMA smoothing against camera jitter
+        if {[dict exists $st ema]} {
+            lassign [dict get $st ema] ex ey
+            set x [expr {0.4 * $x + 0.6 * $ex}]
+            set y [expr {0.4 * $y + 0.6 * $ey}]
+        }
+        dict set st ema [list $x $y]
+
+        # position in fractional cell coordinates
+        set cx [expr {($x - $OX) / double($CELL)}]
+        set cy [expr {($y - $OY) / double($CELL)}]
+
+        switch -- $kind {
+            bulldozer -
+            paver {
+                set radius [expr {$kind eq "bulldozer" ? $DOZER_RADIUS : $PAVER_RADIUS}]
+                set cells {}
+                if {[dict exists $st prev]} {
+                    lassign [dict get $st prev] px py pt
+                    if {$now - $pt <= $TRAIL_MAX_MS} {
+                        # continuous stroke — no dotted roads at speed
+                        set cells [::folkville::strokeCells $px $py $cx $cy $radius $COLS $ROWS]
+                    }
+                }
+                if {[llength $cells] == 0} {
+                    set cells [::folkville::brushCells $cx $cy $radius $COLS $ROWS]
+                }
+                if {$kind eq "bulldozer"} {
+                    incr changed [::folkville::bulldoze terrain houses $cells $COLS]
+                } else {
+                    incr changed [::folkville::pave terrain $cells $COLS]
+                }
+                dict set st prev [list $cx $cy $now]
+            }
+            crane {
+                # spent latch: no machine-gunning houses — move 3 cells first
+                if {[dict exists $st spent]} {
+                    lassign [dict get $st spent] sx sy
+                    if {hypot($cx - $sx, $cy - $sy) > 3.0} { dict unset st spent }
+                }
+                set hist [dict getdef $st hist {}]
+                lappend hist [list $now $cx $cy]
+                while {[llength $hist] > 0 && $now - [lindex [lindex $hist 0] 0] > $DWELL_MS + 200} {
+                    set hist [lrange $hist 1 end]
+                }
+                dict set st hist $hist
+
+                if {![dict exists $st spent] && [llength $hist] >= 6} {
+                    set age    [expr {$now - [lindex [lindex $hist 0] 0]}]
+                    set spread [::folkville::histSpread $hist]
+                    if {$spread < $DWELL_SPREAD} {
+                        if {$age >= $DWELL_MS} {
+                            # build site: 2.5 cells in front of the card's nose
+                            lassign [::folkville::quadUp $q] ux uy
+                            set siteC [expr {int(round($cx + $ux * 2.5)) - 1}]
+                            set siteR [expr {int(round($cy + $uy * 2.5)) - 1}]
+                            if {[::folkville::tryPlaceHouse terrain houses $siteC $siteR $COLS $ROWS]} {
+                                incr changed
+                                dict set st spent [list $cx $cy]
+                                dict set st hist {}
+                            }
+                        } else {
+                            set frac [expr {double($age) / $DWELL_MS}]
+                            Hold! -key [list folkville dwell $p] -keep 400ms \
+                                Claim the folkville crane dwell is $frac at [list $x $y]
+                        }
+                    }
+                }
+            }
+            reset {
+                set resetVisible 1
+            }
+        }
+        dict set toolState $p $st
+    }
+
+    # reset card: face-up presence for RESET_MS, once per showing
+    if {$resetVisible} {
+        if {$resetSince == 0} { set resetSince $now }
+        if {!$resetDone && $now - $resetSince > $RESET_MS} {
+            set terrain [::folkville::initTerrain $COLS $ROWS]
+            set houses {}
+            set resetDone 1
+            incr changed
+        }
+    } else {
+        set resetSince 0
+        set resetDone 0
+    }
+
+    if {$changed > 0} {
+        incr rev
+        holdScene
+    }
+
+    if {$now - $lastSave > 10000} {
+        ::folkville::saveSnapshot $SNAPSHOT $terrain $houses $rev
+        set lastSave $now
+    }
+
+    exec sleep $TICK_S
+}
