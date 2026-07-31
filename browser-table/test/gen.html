@@ -1,0 +1,29 @@
+<script src="../vendor/cv.js"></script>
+<script src="../vendor/aruco.js"></script>
+<script src="../vendor/apriltag_36h11.js"></script>
+<script>
+const dict = new AR.Dictionary('APRILTAG_36h11');
+async function tagImg(id) {
+  const svg = dict.generateSVG(id).replace('<svg ', '<svg width="200" height="200" ');
+  const img = new Image();
+  await new Promise((res, rej) => { img.onload = res; img.onerror = rej;
+    img.src = 'data:image/svg+xml;base64,' + btoa(svg); });
+  return img;
+}
+// tags: [{id, x, y, size, angle}] in image px; angle deg clockwise, 0 = up
+window.gen = async (w, h, tags) => {
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const x = c.getContext('2d');
+  x.fillStyle = '#b9c4b2'; x.fillRect(0, 0, w, h);      // table felt
+  for (const t of tags) {
+    const img = await tagImg(t.id);
+    x.save(); x.translate(t.x, t.y); x.rotate(t.angle * Math.PI / 180);
+    x.fillStyle = '#fff';                               // the paper the tag is printed on
+    x.fillRect(-t.size * .65, -t.size * .65, t.size * 1.3, t.size * 1.3);
+    x.drawImage(img, -t.size / 2, -t.size / 2, t.size, t.size);
+    x.restore();
+  }
+  return c.toDataURL('image/png');
+};
+window.CAL_BASE = AR.DICTIONARIES.APRILTAG_36h11.codeList.length - 4;
+</script>
