@@ -1,0 +1,125 @@
+<title>Folk browser table</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin:0; background:#0b0d0c; color:#cfd8d3;
+         font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; }
+  header { display:flex; gap:1.5rem; align-items:baseline; padding:.7rem 1rem;
+           border-bottom:1px solid #1e2422; }
+  h1 { font-size:13px; margin:0; letter-spacing:.14em; text-transform:uppercase; color:#8fd6a8; }
+  .hint { color:#6d7a75; }
+  #table { position:relative; margin:1rem auto;
+           background:#000; border:1px solid #1e2422; overflow:hidden; touch-action:none; }
+  canvas { position:absolute; inset:0; }
+  .card { position:absolute; width:120px; height:90px; margin:-45px 0 0 -60px;
+          /* translucent: an app may draw underneath the card — folkville's
+             crane builds its house ~50px in front of the nose, i.e. right
+             under the card itself, and opaque cards hide the result */
+          background:#f2efe6e0; color:#111; border-radius:3px; cursor:grab;
+          box-shadow:0 6px 18px #000a; display:flex; flex-direction:column;
+          align-items:center; justify-content:center; user-select:none;
+          font-size:11px; letter-spacing:.08em; text-align:center; }
+  .card b { font-size:12px; }
+  .card small { color:#666; font-size:9px; }
+  .card.off { opacity:.22; }
+  .nose { position:absolute; top:2px; width:0;height:0;
+          border:6px solid transparent; border-bottom-color:#c0392b; }
+  .tray { text-align:center; color:#6d7a75; padding-bottom:2rem; }
+  button { font:inherit; background:#141917; color:#cfd8d3; border:1px solid #2a3330;
+           padding:.3rem .7rem; border-radius:3px; cursor:pointer; }
+</style>
+<header>
+  <h1 id="title">Folk browser table</h1>
+  <span class="hint">drag = move · scroll = rotate (aims the card's red nose) · double-click = lift off the table</span>
+  <span class="hint" id="stat"></span>
+</header>
+<div id="table"><canvas id="c"></canvas></div>
+<div class="tray"><button id="reload">reload page</button></div>
+<script>
+const table = document.getElementById('table');
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let CARDS = [], W = 1200, H = 760;
+const els = {};
+
+// The card list and display size come from the app's manifest — nothing about
+// any particular Folk app is baked into this page.
+async function boot() {
+  const t = await (await fetch('/table.json')).json();
+  [W, H] = t.display;
+  CARDS = t.cards;
+  document.title = `Folk browser table — ${CARDS.length} cards`;
+  table.style.width = W + 'px'; table.style.height = H + 'px';
+  canvas.width = W; canvas.height = H;
+  for (const d of CARDS) {
+    d.angle = 0;
+    const e = document.createElement('div');
+    e.className = 'card' + (d.on ? '' : ' off');
+    e.innerHTML = `<div class="nose"></div><b>${d.label}</b><small>${d.program}</small>`;
+    table.appendChild(e); els[d.kind] = e;
+    place(d);
+    e.addEventListener('pointerdown', ev => {
+      e.setPointerCapture(ev.pointerId); e.style.cursor = 'grabbing';
+      const move = m => { const r = table.getBoundingClientRect();
+        d.x = m.clientX - r.left; d.y = m.clientY - r.top; place(d); push(); };
+      const up = () => { e.style.cursor = 'grab';
+        e.removeEventListener('pointermove', move); e.removeEventListener('pointerup', up); };
+      e.addEventListener('pointermove', move); e.addEventListener('pointerup', up);
+    });
+    e.addEventListener('wheel', ev => { ev.preventDefault();
+      d.angle = (d.angle + Math.sign(ev.deltaY) * 6 + 360) % 360; place(d); push(); }, {passive:false});
+    e.addEventListener('dblclick', () => { d.on = !d.on;
+      e.classList.toggle('off', !d.on); push(true); });
+  }
+  push(true); setInterval(() => push(false), 60);
+  poll(); draw();
+}
+function place(d){ const e = els[d.kind];
+  e.style.left = d.x+'px'; e.style.top = d.y+'px';
+  e.style.transform = `rotate(${d.angle}deg)`; }
+
+// Post only when something actually changed (plus a slow heartbeat), and never
+// overlap posts: the bridge samples at ~20Hz and an app may treat a long gap
+// between samples as a teleport, which breaks continuous strokes.
+let posting = false, lastBody = '', lastPost = 0;
+async function push(force){
+  const body = JSON.stringify(CARDS.filter(d=>d.on).map(d=>({kind:d.kind,x:d.x,y:d.y,angle:d.angle})));
+  if (posting) return;
+  if (!force && body === lastBody && performance.now() - lastPost < 1000) return;
+  posting = true; lastBody = body; lastPost = performance.now();
+  try { await fetch('/cards', {method:'POST', body}); } finally { posting = false; }
+}
+
+// Fetch the scene on its own slow timer; paint from the cached copy. Fetching
+// inside requestAnimationFrame meant 60 scene downloads/sec, which starved the
+// bridge of the POSTs carrying card positions.
+let scene = {items:[]};
+async function poll(){
+  try { scene = await (await fetch('/scene.json')).json(); } catch(e){}
+  setTimeout(poll, 120);
+}
+
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  const items = scene.items.slice().sort((a,b)=>(a.layer||0)-(b.layer||0));
+  for (const it of items) {
+    ctx.strokeStyle = ctx.fillStyle = it.color || 'white';
+    if (it.t === 'poly') {
+      ctx.beginPath(); it.pts.forEach((p,i)=> i?ctx.lineTo(p[0],p[1]):ctx.moveTo(p[0],p[1]));
+      ctx.closePath(); ctx.fill();
+    } else if (it.t === 'line') {
+      ctx.lineWidth = it.w || 1; ctx.beginPath();
+      it.pts.forEach((p,i)=> i?ctx.lineTo(p[0],p[1]):ctx.moveTo(p[0],p[1])); ctx.stroke();
+    } else if (it.t === 'circle') {
+      ctx.beginPath(); ctx.arc(it.c[0][0], it.c[0][1], it.r, 0, 6.2832);
+      if (it.filled) ctx.fill(); else { ctx.lineWidth = it.thickness||2; ctx.stroke(); }
+    } else if (it.t === 'text') {
+      ctx.font = `${it.scale||16}px ui-monospace, monospace`;
+      it.text.split('\n').forEach((ln,i)=> ctx.fillText(ln, it.x, it.y + i*(it.scale||16)*1.2));
+    }
+  }
+  document.getElementById('stat').textContent = `${scene.items.length} draw wishes from Folk`;
+  requestAnimationFrame(draw);
+}
+document.getElementById('reload').onclick = ()=>location.reload();
+boot();
+</script>

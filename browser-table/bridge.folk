@@ -1,0 +1,105 @@
+# bridge.folk — the Folk-side half of the browser table. App-agnostic: which
+# card kind maps to which program comes from harness.folk's manifest claim.
+#
+#   reads  /tmp/browser-table-cards.json  (written by server.py from mouse drags)
+#          -> `Claim <card program> has quad ...`, i.e. what the camera would say
+#   writes /tmp/browser-table-scene.json  (read by the canvas)
+#          <- the app's draw wishes, i.e. what the projector would show
+#
+# Also prints any program error Folk records, since Folk files errors as
+# statements rather than printing them — a program that "does nothing" is
+# usually a program that threw.
+
+set SCENE "/tmp/browser-table-scene.json"
+set CARDS "/tmp/browser-table-cards.json"
+
+# Turn card positions into quads. This mirrors tags-to-quads.folk: the quads
+# are plain Claims inside a re-evaluated When body, so they retract themselves
+# when the positions change. Holding a separate quad key per card at drag rate
+# instead churns the db hard enough to disrupt other programs.
+#
+# A When body runs in a FRESH interpreter — it cannot see this program's procs
+# or variables — so the quad math is inlined and the card map arrives as a
+# claim.
+When the browser table cards are /kindToProgram/ & \
+     the browser table has cards /cards/ {
+    foreach card $cards {
+        lassign $card kind cx cy angle
+        if {![dict exists $kindToProgram $kind]} continue
+        set a [expr {$angle * 3.14159265358979 / 180.0}]
+        set ca [expr {cos($a)}]; set sa [expr {sin($a)}]
+        set hw 60.0; set hh 45.0
+        set verts {}
+        foreach {dx dy} [list [expr {-$hw}] [expr {-$hh}] \
+                              $hw [expr {-$hh}] \
+                              $hw $hh \
+                              [expr {-$hw}] $hh] {
+            lappend verts [list [expr {$cx + $dx*$ca - $dy*$sa}] \
+                                [expr {$cy + $dx*$sa + $dy*$ca}] 0]
+        }
+        # Quads are {space {topLeft topRight bottomRight bottomLeft}} in
+        # display space — the same shape a printed card's tag produces.
+        Claim [dict get $kindToProgram $kind] has quad [list "display web" $verts]
+    }
+}
+
+proc jsonStr {s} { return "\"[string map {\\ \\\\ \" \\\" \n \\n} $s]\"" }
+proc jsonNums {pts} {
+    set out {}
+    foreach p $pts { lappend out "\[[lindex $p 0],[lindex $p 1]\]" }
+    return "\[[join $out ,]\]"
+}
+
+set lastData ""
+
+while true {
+    # ---- mouse drags -> card positions (the camera's job) ----------------
+    if {[file exists $CARDS]} {
+        catch {
+            set fp [open $CARDS r]; set data [string trim [read $fp]]; close $fp
+            if {$data ne $lastData} {
+                set lastData $data
+                Hold! -key {browser table cards} \
+                    Claim the browser table has cards $data
+            }
+        }
+    }
+
+    # ---- draw wishes -> JSON for the canvas (the projector's job) --------
+    catch {
+        set items {}
+        foreach m [Query! /someone/ wishes to draw a polygon onto /disp/ with points /pts/ color /color/ layer /layer/] {
+            lappend items "{\"t\":\"poly\",\"pts\":[jsonNums [dict get $m pts]],\"color\":[jsonStr [dict get $m color]],\"layer\":[dict get $m layer]}"
+        }
+        foreach m [Query! /someone/ wishes to draw a circle onto /disp/ with center /c/ radius /r/ filled /f/ color /color/ layer /layer/] {
+            lappend items "{\"t\":\"circle\",\"c\":[jsonNums [list [dict get $m c]]],\"r\":[dict get $m r],\"filled\":true,\"color\":[jsonStr [dict get $m color]],\"layer\":[dict get $m layer]}"
+        }
+        foreach m [Query! /someone/ wishes to draw a circle onto /disp/ with center /c/ radius /r/ thickness /th/ color /color/ layer /layer/] {
+            lappend items "{\"t\":\"circle\",\"c\":[jsonNums [list [dict get $m c]]],\"r\":[dict get $m r],\"thickness\":[dict get $m th],\"color\":[jsonStr [dict get $m color]],\"layer\":[dict get $m layer]}"
+        }
+        foreach m [Query! /someone/ wishes to draw a line onto /disp/ with points /pts/ width /w/ color /color/] {
+            lappend items "{\"t\":\"line\",\"pts\":[jsonNums [dict get $m pts]],\"w\":[dict get $m w],\"color\":[jsonStr [dict get $m color]],\"layer\":9}"
+        }
+        foreach m [Query! /someone/ wishes to draw text onto /disp/ with x /x/ y /y/ text /text/ color /color/ scale /scale/] {
+            lappend items "{\"t\":\"text\",\"x\":[dict get $m x],\"y\":[dict get $m y],\"text\":[jsonStr [dict get $m text]],\"color\":[jsonStr [dict get $m color]],\"scale\":[dict get $m scale],\"layer\":9}"
+        }
+        set fp [open $SCENE.tmp w]
+        puts $fp "{\"items\":\[[join $items ,]\]}"
+        close $fp
+        file rename -force $SCENE.tmp $SCENE
+    }
+
+    # ---- surface program errors, which Folk otherwise only files away ----
+    catch {
+        foreach e [Query! /p/ has error /err/ with info /info/] {
+            set k [dict get $e err]
+            if {![info exists ::seenErr($k)]} {
+                set ::seenErr($k) 1
+                puts $::realStderr "PROGRAM-ERROR: [dict get $e p] :: $k"
+                puts $::realStderr "  info: [string range [dict get $e info] 0 400]"
+            }
+        }
+    }
+
+    sleep 0.05
+}

@@ -1,0 +1,65 @@
+# harness.folk — run a Folk app on REAL Folk with no camera, projector or
+# printer. The Folk half of the browser table (see README.md).
+#
+# Nothing in here is app-specific: what to load and which cards exist come
+# from a manifest, given as $FOLK_TABLE.
+#
+#   FOLK_TABLE=/abs/path/to/app/browser-table.tcl ./folk /abs/path/harness.folk
+
+if {![info exists ::env(FOLK_TABLE)]} {
+    puts $::realStderr "harness: set FOLK_TABLE to an app manifest, e.g."
+    puts $::realStderr "  FOLK_TABLE=\$PWD/folkville/browser-table.tcl ./folk .../harness.folk"
+    Exit! 1
+}
+set ::MANIFEST [file normalize $::env(FOLK_TABLE)]
+set ::APPDIR   [file dirname $::MANIFEST]
+
+# ---- manifest ------------------------------------------------------------
+# A tiny Tcl DSL: `display W H`, `program FILE`, `card KIND LABEL FILE X Y ?off?`.
+set ::displaySize {1200 760}
+set ::programs {}
+set ::cards {}      ;# {kind label programPath x y onTable}
+
+proc display {w h} { set ::displaySize [list $w $h] }
+proc program {file} { lappend ::programs [file join $::APPDIR $file] }
+proc card {kind label file x y {state on}} {
+    lappend ::cards [list $kind $label [file join $::APPDIR $file] \
+                          $x $y [expr {$state ne "off"}]]
+    lappend ::programs [file join $::APPDIR $file]
+}
+source $::MANIFEST
+
+# ---- the program-loading mechanism, lifted from boot.folk ----------------
+Assert! when /_this/ has program code /programCode/ {
+    SayWithSource $_this 1 0 {} {} \
+        when $programCode with environment [list [list this $_this]]
+} with environment {}
+
+proc LoadProgram! {path} {
+    set fp [open $path r]; set code [read $fp]; close $fp
+    Hold! -key [list $path code] Claim $path has program code $code
+}
+
+# ---- stand-ins for the hardware ------------------------------------------
+lassign $::displaySize DW DH
+Assert! display "web" has width $DW height $DH
+
+# bridge.folk's When bodies run in their own interpreter and can't read this
+# script's variables, so the kind -> program mapping goes in as a claim.
+set kindToProgram [dict create]
+foreach c $::cards {
+    lassign $c kind label programPath
+    dict set kindToProgram $kind $programPath
+}
+Assert! the browser table cards are $kindToProgram
+
+# ---- the app's programs, unmodified, plus the browser bridge -------------
+foreach p $::programs { LoadProgram! $p }
+LoadProgram! [file join [file dirname [file normalize [info script]]] bridge.folk]
+puts $::realStderr "harness: loaded [llength $::programs] programs from $::APPDIR"
+puts $::realStderr "harness: open http://localhost:4274 (server.py must be running)"
+
+# The main thread must stay out of the way. Running the bridge's poll loop
+# here instead wedges the evaluator: a long-running app loop (folkville's
+# engine, say) stops after a handful of ticks and the world freezes.
+while true { sleep 5 }
