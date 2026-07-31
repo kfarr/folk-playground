@@ -2,7 +2,8 @@
 """Serves the browser table and mediates between it and the Folk process.
 
 GET  /            -> the mouse table page
-GET  /phone       -> the phone table page (camera + overlay; see README)
+GET  /camera      -> the camera table page (camera + overlay; see README);
+                     /phone is kept as an alias
 GET  /tags        -> printable AprilTag cards + calibration corners
 GET  /vendor/*    -> the vendored tag-detection library
 GET  /table.json  -> display size and card list, read from the app manifest
@@ -25,7 +26,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 HOST = os.environ.get("HOST", "0.0.0.0")   # the phone connects over the LAN
 PORT = int(os.environ.get("PORT", 4274))
 
-PAGES = {"/": "table.html", "/phone": "phone.html", "/tags": "tags.html"}
+PAGES = {"/": "table.html", "/camera": "camera.html", "/phone": "camera.html",
+         "/tags": "tags.html"}
 
 
 def read_manifest(path):
@@ -89,7 +91,7 @@ class H(http.server.BaseHTTPRequestHandler):
             else:
                 self._send(404, "{}")
         elif path == "/test.png" and os.environ.get("BROWSER_TABLE_TEST_IMG"):
-            # test hook: lets the test suite feed phone.html?img=/test.png a
+            # test hook: lets the test suite feed camera.html?img=/test.png a
             # synthetic table photo from the same origin
             with open(os.environ["BROWSER_TABLE_TEST_IMG"], "rb") as f:
                 self._send(200, f.read(), "image/png")
@@ -156,10 +158,10 @@ if ctx:
     https = socketserver.ThreadingTCPServer((HOST, PORT + 1), H)
     https.socket = ctx.wrap_socket(https.socket, server_side=True)
     threading.Thread(target=https.serve_forever, daemon=True).start()
-    print(f"phone table:   https://{ip}:{PORT + 1}/phone  (accept the certificate once)")
+    print(f"camera table:  https://{ip}:{PORT + 1}/camera  (accept the certificate once)")
     print(f"print tags:    http://localhost:{PORT}/tags")
 else:
-    print("phone table:   (no openssl found — iOS needs HTTPS for the camera; "
+    print("camera table:  (no openssl found — iOS needs HTTPS for the camera; "
           "install openssl or serve via mkcert)")
 with socketserver.ThreadingTCPServer((HOST, PORT), H) as httpd:
     httpd.serve_forever()

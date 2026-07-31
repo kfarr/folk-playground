@@ -8,7 +8,7 @@ exactly as it would on hardware.
 
 There are two table clients. The **mouse table** (`/`) fakes the physical world
 entirely: cards are divs you drag. The **[phone table](#phone-table--a-phone-as-camera-and-projector)**
-(`/phone`) plays with the real physical world: printed cards on a real surface,
+(`/camera`) plays with the real physical world: printed cards on a real surface,
 a phone mounted overhead as the camera, its screen (mirrored to a TV) as the
 projector.
 
@@ -83,14 +83,16 @@ needs to change.
 
 ## phone-table — a phone as camera and projector
 
-![phone.html overlaying folkville draw wishes on a synthetic table photo, from the test suite](phone-screenshot.png)
+![camera.html overlaying folkville draw wishes on a synthetic table photo, from the test suite](phone-screenshot.png)
 
 For testing gameplay with *actual objects* when you have no projector and no
 mountable external camera: mount a phone looking down at a table, put printed
 cards on it, and mirror the phone's screen to a TV. The computer still runs
 Folk and `server.py` as the host; the phone is just a browser tab on the same
 Wi‑Fi. `harness.folk` and `bridge.folk` are untouched — the phone is a second
-client of the same server that happens to be a real camera:
+client of the same server that happens to be a real camera. A phone is just the
+convenient mount: `/camera` works on any device with a camera — opening it in a
+second window on the host Mac, using its webcam, is the quickest way to try it:
 
 | hardware | mouse table | phone table |
 | --- | --- | --- |
@@ -112,7 +114,7 @@ is its index in the manifest (first `card` line = tag 0, …).
 2. Open `http://localhost:4274/tags`, print at 100%, cut out the cards.
    For folkville there's a ready-made [`folkville/printable-tags.pdf`](../folkville/printable-tags.pdf);
    `/tags` regenerates it for whatever app the manifest describes.
-3. On the phone: `https://<computer-ip>:4275/phone`, accept the certificate
+3. On the phone: `https://<computer-ip>:4275/camera`, accept the certificate
    warning once, tap **start camera**. Mount the phone facing down — a cheap
    gooseneck clamp works. Screen-mirror the phone to the TV via AirPlay.
 4. Lay the four **corner tags** where the table's corners should be and tap
@@ -185,7 +187,7 @@ Folk's own renderer), and printing. Those still need the real table.
 | `bridge.folk` | card positions → quad claims; draw wishes → scene JSON; prints program errors |
 | `server.py` | serves the pages (HTTP + HTTPS), exposes the manifest as `/table.json`, mediates the two JSON files |
 | `table.html` | the mouse table: draggable cards over a canvas |
-| `phone.html` | the phone table: camera → tag detection → homography → card positions; draw wishes over live video |
+| `camera.html` | the camera table: camera → tag detection → homography → card positions; draw wishes over live video |
 | `tags.html` | printable tag36h11 cards + calibration corner tags |
 | `vendor/` | js-aruco2 (MIT) + the AprilTag 36h11 dictionary (BSD, U. Michigan) |
-| `test/` | end-to-end phone-table test, no camera needed: synthesizes photos of tags, runs them through `/phone`, asserts on what reaches Folk (`cd test && npm i playwright-core && node test.mjs`) |
+| `test/` | end-to-end phone-table test, no camera needed: synthesizes photos of tags, runs them through `/camera`, asserts on what reaches Folk (`cd test && npm i playwright-core && node test.mjs`) |

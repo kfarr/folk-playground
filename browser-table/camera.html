@@ -1,4 +1,4 @@
-<title>Folk phone table</title>
+<title>Folk camera table</title>
 <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -25,7 +25,7 @@
   #start button { font-size:15px; padding:.8rem 1.6rem; border-color:#8fd6a8; color:#8fd6a8; }
 </style>
 <canvas id="view"></canvas>
-<div id="hud"><b>FOLK PHONE TABLE</b><span id="stat">…</span></div>
+<div id="hud"><b>FOLK CAMERA TABLE</b><span id="stat">…</span></div>
 <div id="btns">
   <button id="cal">calibrate</button>
   <button id="clearcal" class="hidden">clear calibration</button>
@@ -33,10 +33,11 @@
   <button id="flip">rotate 180°</button>
 </div>
 <div id="start">
-  <h1>Folk phone table</h1>
-  <p>Mount this phone looking straight down at your table, with the printed cards
+  <h1>Folk camera table</h1>
+  <p>Point this device's camera down at your table — a phone mounted overhead, or
+     any laptop/webcam that can see it — with the printed cards
      (<a href="/tags">print them here</a>) in view. The camera stands in for Folk's
-     camera; this screen stands in for its projector — AirPlay-mirror it to a TV.</p>
+     camera; this screen stands in for its projector — mirror it to a TV if you like.</p>
   <p>For an exact table mapping, lay the four printed corner tags where you want the
      table's corners, then tap <em>calibrate</em>. Without it, the camera frame is
      assumed to be a straight-down view of the whole table.</p>
@@ -46,7 +47,7 @@
 <script src="/vendor/aruco.js"></script>
 <script src="/vendor/apriltag_36h11.js"></script>
 <script>
-// The phone is just another table client: it plays the camera (tag detection in
+// This page is just another table client: it plays the camera (tag detection in
 // camera space, mapped to display space, POSTed as card positions) and the
 // projector (the app's draw wishes painted over the live video). server.py,
 // bridge.folk and harness.folk are the same ones the mouse table uses.
@@ -62,6 +63,12 @@
 const view = document.getElementById('view'), ctx = view.getContext('2d');
 const stat = document.getElementById('stat');
 const qs = new URLSearchParams(location.search);
+
+// The scene is drawn opaque into an offscreen layer, then composited over the
+// video at OVERLAY_ALPHA — per-item alpha would compound where shapes overlap
+// (roads over grass), an offscreen composite keeps their relative opacity.
+const ov = document.createElement('canvas'), octx = ov.getContext('2d');
+const OVERLAY_ALPHA = qs.has('alpha') ? Math.min(1, Math.max(0, +qs.get('alpha'))) : 0.8;
 
 let W = 1200, H = 760, KINDS = [];               // display size; tag id -> card kind
 let src = null, srcW = 0, srcH = 0;              // the camera (or ?img= still)
@@ -239,34 +246,41 @@ function draw() {
     const o = mp(W/2, H/2), o2 = mp(W/2 + 100, H/2);
     const s = Math.hypot(o2.x-o.x, o2.y-o.y) / 100;    // local px-per-display-px
 
-    ctx.strokeStyle = '#8fd6a866'; ctx.lineWidth = 2;  // the table's edge
-    ctx.beginPath();
+    if (ov.width !== srcW) { ov.width = srcW; ov.height = srcH; }
+    octx.clearRect(0, 0, ov.width, ov.height);
+
+    octx.strokeStyle = '#8fd6a866'; octx.lineWidth = 2;  // the table's edge
+    octx.beginPath();
     [[0,0],[W,0],[W,H],[0,H]].forEach(([x,y], i) => {
-      const p = mp(x, y); i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y);
+      const p = mp(x, y); i ? octx.lineTo(p.x, p.y) : octx.moveTo(p.x, p.y);
     });
-    ctx.closePath(); ctx.stroke();
+    octx.closePath(); octx.stroke();
 
     const items = scene.items.slice().sort((a,b) => (a.layer||0)-(b.layer||0));
     for (const it of items) {
-      ctx.strokeStyle = ctx.fillStyle = it.color || 'white';
+      octx.strokeStyle = octx.fillStyle = it.color || 'white';
       if (it.t === 'poly') {
-        ctx.beginPath();
-        it.pts.forEach((p,i) => { const q = mp(p[0], p[1]); i ? ctx.lineTo(q.x,q.y) : ctx.moveTo(q.x,q.y); });
-        ctx.closePath(); ctx.fill();
+        octx.beginPath();
+        it.pts.forEach((p,i) => { const q = mp(p[0], p[1]); i ? octx.lineTo(q.x,q.y) : octx.moveTo(q.x,q.y); });
+        octx.closePath(); octx.fill();
       } else if (it.t === 'line') {
-        ctx.lineWidth = (it.w || 1) * s; ctx.beginPath();
-        it.pts.forEach((p,i) => { const q = mp(p[0], p[1]); i ? ctx.lineTo(q.x,q.y) : ctx.moveTo(q.x,q.y); });
-        ctx.stroke();
+        octx.lineWidth = (it.w || 1) * s; octx.beginPath();
+        it.pts.forEach((p,i) => { const q = mp(p[0], p[1]); i ? octx.lineTo(q.x,q.y) : octx.moveTo(q.x,q.y); });
+        octx.stroke();
       } else if (it.t === 'circle') {
         const q = mp(it.c[0][0], it.c[0][1]);
-        ctx.beginPath(); ctx.arc(q.x, q.y, it.r * s, 0, 6.2832);
-        if (it.filled) ctx.fill(); else { ctx.lineWidth = (it.thickness||2) * s; ctx.stroke(); }
+        octx.beginPath(); octx.arc(q.x, q.y, it.r * s, 0, 6.2832);
+        if (it.filled) octx.fill(); else { octx.lineWidth = (it.thickness||2) * s; octx.stroke(); }
       } else if (it.t === 'text') {
         const q = mp(it.x, it.y), fs = (it.scale||16) * s;
-        ctx.font = `${fs}px ui-monospace, monospace`;
-        it.text.split('\n').forEach((ln,i) => ctx.fillText(ln, q.x, q.y + i*fs*1.2));
+        octx.font = `${fs}px ui-monospace, monospace`;
+        it.text.split('\n').forEach((ln,i) => octx.fillText(ln, q.x, q.y + i*fs*1.2));
       }
     }
+
+    ctx.globalAlpha = OVERLAY_ALPHA;
+    ctx.drawImage(ov, 0, 0);
+    ctx.globalAlpha = 1;
 
     if (showTags || calMode) {
       for (const m of markers) {

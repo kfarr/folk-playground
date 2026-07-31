@@ -1,6 +1,6 @@
 // End-to-end test of the phone table, no phone or camera required: synthesize
 // "photos" of a table with real tag36h11 tags on it (gen.html), feed them to
-// phone.html?img= through the real server.py, and assert on the card positions
+// camera.html?img= through the real server.py, and assert on the card positions
 // that would reach Folk via /tmp/browser-table-cards.json.
 //
 //   cd browser-table/test && npm i playwright-core && node test.mjs
@@ -110,7 +110,7 @@ await new Promise(r => setTimeout(r, 800));
 const ctxA = await browser.newContext({ viewport: { width: 1000, height: 750 } });
 const pageA = await ctxA.newPage();
 pageA.on('pageerror', e => console.log('  [pageerror]', e.message));
-await pageA.goto('http://127.0.0.1:4380/phone?img=/test.png');
+await pageA.goto('http://127.0.0.1:4380/camera?img=/test.png');
 
 const cardsA = await waitCards(c => c.bulldozer && c.paver && c.crane);
 check('A: all three cards detected', !!(cardsA.bulldozer && cardsA.paver && cardsA.crane),
@@ -152,7 +152,7 @@ await new Promise(r => setTimeout(r, 800));
 const ctxB = await browser.newContext({ viewport: { width: 1000, height: 750 } });
 const pageB = await ctxB.newPage();
 pageB.on('pageerror', e => console.log('  [pageerror]', e.message));
-await pageB.goto('http://127.0.0.1:4390/phone?img=/test.png');
+await pageB.goto('http://127.0.0.1:4390/camera?img=/test.png');
 await pageB.waitForFunction(() => window.PHONE && window.PHONE.state.srcW > 0);
 
 // uncalibrated, the warped paver lands far from (600,380) — prove it, then calibrate

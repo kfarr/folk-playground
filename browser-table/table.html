@@ -80,12 +80,17 @@ function place(d){ const e = els[d.kind];
 // Post only when something actually changed (plus a slow heartbeat), and never
 // overlap posts: the bridge samples at ~20Hz and an app may treat a long gap
 // between samples as a teleport, which breaks continuous strokes.
-let posting = false, lastBody = '', lastPost = 0;
+// The heartbeat stops 3s after the last change: /cards is last-writer-wins
+// across every open table client, so an idle tab left over from a sanity check
+// must go silent or it clobbers the phone's card posts once a second.
+let posting = false, lastBody = '', lastPost = 0, lastChange = performance.now();
 async function push(force){
   const body = JSON.stringify(CARDS.filter(d=>d.on).map(d=>({kind:d.kind,x:d.x,y:d.y,angle:d.angle})));
   if (posting) return;
-  if (!force && body === lastBody && performance.now() - lastPost < 1000) return;
-  posting = true; lastBody = body; lastPost = performance.now();
+  const now = performance.now();
+  if (body !== lastBody) lastChange = now;
+  else if (!force && (now - lastPost < 1000 || now - lastChange > 3000)) return;
+  posting = true; lastBody = body; lastPost = now;
   try { await fetch('/cards', {method:'POST', body}); } finally { posting = false; }
 }
 
