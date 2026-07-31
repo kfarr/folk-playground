@@ -1,0 +1,58 @@
+folkville on the browser table — how to start and stop it
+==========================================================
+
+START (two processes, two terminals or background them)
+
+  cd ~/dev/folk-playground
+  export FOLK_TABLE=$PWD/folkville/browser-table.tcl
+  python3 browser-table/server.py &
+  cd ~/dev/folk && ./folk ~/dev/folk-playground/browser-table/harness.folk
+
+  Then open:  http://localhost:4274
+
+  drag a card         move it (the paver lays road as it goes)
+  scroll over a card  rotate it — the red nose aims the crane's build site
+  double-click        lift the card off the table / put it back
+
+STOP
+
+  pkill -f browser-table/harness.folk
+  pkill -f browser-table/server.py
+
+  Folk pins several CPU cores while it runs — its worker threads spin rather
+  than idle, so expect 300-650% CPU in Activity Monitor even when nothing is
+  moving. That is Folk, not this harness. Kill it when you are done.
+
+LOGS
+
+  /tmp/bt-folk.log      Folk + the app. PROGRAM-ERROR: lines appear here —
+                        Folk files program errors as statements instead of
+                        printing them, so this is where a program that
+                        "does nothing" explains itself.
+  /tmp/bt-server.log    the web server
+  /tmp/folkbuild.log    the Folk build
+
+FRESH WORLD
+
+  rm ~/folkville-world.snapshot     (before starting; state persists here)
+
+THE FOLK BUILD
+
+  Lives in ~/dev/folk, built with:
+
+    git clone --depth 1 https://github.com/FolkComputer/folk ~/dev/folk
+    cd ~/dev/folk
+    make deps
+    make folk CFLAGS="-L$(brew --prefix openssl@3)/lib -I$(brew --prefix openssl@3)/include"
+
+  The CFLAGS are needed on macOS; without them the link fails with
+  "ld: library 'ssl' not found". This is the plain `folk` target — no GPU,
+  no camera, no builtin-programs, which is all folkville needs.
+
+  It is a shallow clone, so `git pull` will not work until you run
+  `git fetch --unshallow` in ~/dev/folk.
+
+ANOTHER APP
+
+  Point FOLK_TABLE at a different manifest. See browser-table/README.md for
+  the format; folkville/browser-table.tcl is the example.
