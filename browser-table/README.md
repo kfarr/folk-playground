@@ -110,6 +110,8 @@ is its index in the manifest (first `card` line = tag 0, …).
    HTTPS port 4275 (self-signed) and prints its LAN address — iOS refuses
    camera access to plain-HTTP origins, so the phone must use `https://`.
 2. Open `http://localhost:4274/tags`, print at 100%, cut out the cards.
+   For folkville there's a ready-made [`folkville/printable-tags.pdf`](../folkville/printable-tags.pdf);
+   `/tags` regenerates it for whatever app the manifest describes.
 3. On the phone: `https://<computer-ip>:4275/phone`, accept the certificate
    warning once, tap **start camera**. Mount the phone facing down — a cheap
    gooseneck clamp works. Screen-mirror the phone to the TV via AirPlay.
