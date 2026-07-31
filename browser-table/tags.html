@@ -1,0 +1,58 @@
+<title>Folk phone table — printable tags</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body { margin:2rem auto; max-width:52rem; background:#fff; color:#111;
+         font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; }
+  h1 { font-size:15px; letter-spacing:.12em; text-transform:uppercase; }
+  p  { color:#555; max-width:44rem; }
+  .sheet { display:flex; flex-wrap:wrap; gap:8mm; margin:1.5rem 0 3rem; }
+  .tag { border:1px dashed #bbb; padding:5mm; text-align:center; break-inside:avoid; }
+  .tag svg { width:50mm; height:50mm; display:block; shape-rendering:crispEdges; }
+  .nose { color:#c0392b; font-size:18px; line-height:1; }
+  .tag b { display:block; margin-top:2mm; letter-spacing:.08em; }
+  .tag small { color:#777; }
+  @media print { .noprint { display:none; } body { margin:0; } }
+</style>
+<div class="noprint">
+  <h1 id="title">Folk phone table — printable tags</h1>
+  <p>Print this page at <b>100% scale</b> and cut along the dashed lines. Each card's
+     red <span class="nose">▲</span> is its nose — the direction the card "points",
+     exactly like the red nose on the mouse table's cards.</p>
+  <p>The four <b>corner tags</b> are for calibration: lay them where you want the
+     table's corners (TL = top-left of the table, and so on), tap <em>calibrate</em>
+     on the phone, then take them off and play.</p>
+  <button onclick="print()">print</button>
+</div>
+<h1>Cards</h1>
+<div class="sheet" id="cards"></div>
+<h1>Calibration corners</h1>
+<div class="sheet" id="corners"></div>
+<script src="/vendor/cv.js"></script>
+<script src="/vendor/aruco.js"></script>
+<script src="/vendor/apriltag_36h11.js"></script>
+<script>
+// Same id scheme as phone.html: card index = tag id; the four highest ids in
+// the 36h11 family are the calibration corners TL TR BR BL.
+const dict = new AR.Dictionary('APRILTAG_36h11');
+const CAL_BASE = AR.DICTIONARIES.APRILTAG_36h11.codeList.length - 4;
+
+function tagEl(id, over, label, sub) {
+  const d = document.createElement('div');
+  d.className = 'tag';
+  d.innerHTML = `<div class="nose">${over}</div>${dict.generateSVG(id)}` +
+                `<b>${label}</b><small>${sub}</small>`;
+  return d;
+}
+(async () => {
+  const t = await (await fetch('/table.json')).json();
+  document.title = `Folk phone table tags — ${t.cards.length} cards`;
+  t.cards.forEach((c, i) =>
+    document.getElementById('cards').appendChild(
+      tagEl(i, '▲', c.label, `${c.kind} — tag ${i}`)));
+  ['TL top-left', 'TR top-right', 'BR bottom-right', 'BL bottom-left'].forEach((n, i) => {
+    const [ab, ...rest] = n.split(' ');
+    document.getElementById('corners').appendChild(
+      tagEl(CAL_BASE + i, '&nbsp;', ab, rest.join(' ')));
+  });
+})();
+</script>

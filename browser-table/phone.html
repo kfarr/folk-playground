@@ -1,0 +1,348 @@
+<title>Folk phone table</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<style>
+  :root { color-scheme: dark; }
+  html,body { margin:0; height:100%; background:#000; color:#cfd8d3; overflow:hidden;
+              font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; }
+  #view { position:fixed; inset:0; width:100%; height:100%; object-fit:contain; }
+  #view.flip { transform:rotate(180deg); }
+  #hud { position:fixed; top:env(safe-area-inset-top,0); left:0; right:0; padding:.5rem .8rem;
+         display:flex; gap:1rem; align-items:baseline; background:#000a; pointer-events:none; }
+  #hud b { color:#8fd6a8; letter-spacing:.12em; }
+  #hud span { color:#9aa7a1; }
+  #btns { position:fixed; bottom:calc(env(safe-area-inset-bottom,0) + .6rem); left:0; right:0;
+          display:flex; gap:.5rem; justify-content:center; }
+  button { font:inherit; background:#141917e6; color:#cfd8d3; border:1px solid #2a3330;
+           padding:.5rem .9rem; border-radius:4px; }
+  button.on { border-color:#8fd6a8; color:#8fd6a8; }
+  .hidden { display:none !important; }
+  #start { position:fixed; inset:0; background:#0b0d0c; display:flex; flex-direction:column;
+           gap:1rem; align-items:center; justify-content:center; text-align:center; padding:2rem; }
+  #start h1 { font-size:14px; letter-spacing:.14em; text-transform:uppercase; color:#8fd6a8; margin:0; }
+  #start p { max-width:32rem; color:#9aa7a1; margin:0; }
+  #start button { font-size:15px; padding:.8rem 1.6rem; border-color:#8fd6a8; color:#8fd6a8; }
+</style>
+<canvas id="view"></canvas>
+<div id="hud"><b>FOLK PHONE TABLE</b><span id="stat">…</span></div>
+<div id="btns">
+  <button id="cal">calibrate</button>
+  <button id="clearcal" class="hidden">clear calibration</button>
+  <button id="debug">tags</button>
+  <button id="flip">rotate 180°</button>
+</div>
+<div id="start">
+  <h1>Folk phone table</h1>
+  <p>Mount this phone looking straight down at your table, with the printed cards
+     (<a href="/tags">print them here</a>) in view. The camera stands in for Folk's
+     camera; this screen stands in for its projector — AirPlay-mirror it to a TV.</p>
+  <p>For an exact table mapping, lay the four printed corner tags where you want the
+     table's corners, then tap <em>calibrate</em>. Without it, the camera frame is
+     assumed to be a straight-down view of the whole table.</p>
+  <button id="go">start camera</button>
+</div>
+<script src="/vendor/cv.js"></script>
+<script src="/vendor/aruco.js"></script>
+<script src="/vendor/apriltag_36h11.js"></script>
+<script>
+// The phone is just another table client: it plays the camera (tag detection in
+// camera space, mapped to display space, POSTed as card positions) and the
+// projector (the app's draw wishes painted over the live video). server.py,
+// bridge.folk and harness.folk are the same ones the mouse table uses.
+//
+// The camera->display mapping is a plane homography solved from four printed
+// corner tags -- the same math Folk's own calibration solves from projected
+// tags -- so a tilted mount keystones correctly. No ARKit / WebXR / device
+// intrinsics anywhere: raw camera pixels in, fiducials out, like real Folk.
+//
+// Dev hook: ?img=/some/path uses a still image instead of the camera (no HTTPS
+// or gesture needed) -- the tests drive the whole pipeline through this.
+
+const view = document.getElementById('view'), ctx = view.getContext('2d');
+const stat = document.getElementById('stat');
+const qs = new URLSearchParams(location.search);
+
+let W = 1200, H = 760, KINDS = [];               // display size; tag id -> card kind
+let src = null, srcW = 0, srcH = 0;              // the camera (or ?img= still)
+let Hc2d = null, Hd2c = null;                    // camera->display homography + inverse
+let scene = {items: []}, sceneOk = false;
+let markers = [], fps = 0;
+let showTags = false;
+
+// Tag ids: card index in the manifest = its tag id. The four HIGHEST ids in
+// the 36h11 family are reserved as calibration corners (TL TR BR BL), well
+// clear of any app's card list. tags.html prints both from the same rule.
+const CAL_BASE = AR.DICTIONARIES.APRILTAG_36h11.codeList.length - 4;
+const CAL_CORNER = ['TL', 'TR', 'BR', 'BL'];
+
+const detector = new AR.Detector({dictionaryName: 'APRILTAG_36h11'});
+
+// ---- tiny homography kit: solve (DLT, 4 points), apply, invert ------------
+function solveH(from, to) {
+  const A = [];
+  for (let i = 0; i < 4; i++) {
+    const {x, y} = from[i], u = to[i].x, v = to[i].y;
+    A.push([x, y, 1, 0, 0, 0, -u*x, -u*y, u]);
+    A.push([0, 0, 0, x, y, 1, -v*x, -v*y, v]);
+  }
+  for (let c = 0; c < 8; c++) {                  // gaussian elimination, partial pivot
+    let p = c;
+    for (let r = c+1; r < 8; r++) if (Math.abs(A[r][c]) > Math.abs(A[p][c])) p = r;
+    [A[c], A[p]] = [A[p], A[c]];
+    if (Math.abs(A[c][c]) < 1e-12) return null;
+    for (let r = 0; r < 8; r++) {
+      if (r === c) continue;
+      const f = A[r][c] / A[c][c];
+      for (let k = c; k < 9; k++) A[r][k] -= f * A[c][k];
+    }
+  }
+  const h = A.map((row, i) => row[8] / A[i][i]);
+  return [h[0],h[1],h[2], h[3],h[4],h[5], h[6],h[7],1];
+}
+function applyH(M, x, y) {
+  const w = M[6]*x + M[7]*y + M[8];
+  return {x: (M[0]*x + M[1]*y + M[2]) / w, y: (M[3]*x + M[4]*y + M[5]) / w};
+}
+function invertH(M) {
+  const [a,b,c,d,e,f,g,h,i] = M;
+  const A = e*i-f*h, B = c*h-b*i, C = b*f-c*e,
+        D = f*g-d*i, E = a*i-c*g, F = c*d-a*f,
+        G = d*h-e*g, Hh = b*g-a*h, I = a*e-b*d;
+  const det = a*A + b*D + c*G;
+  return [A/det,B/det,C/det, D/det,E/det,F/det, G/det,Hh/det,I/det];
+}
+
+// ---- calibration -----------------------------------------------------------
+// Uncalibrated: assume a straight-down view, table rectangle centered in frame.
+function defaultH() {
+  const k = Math.min(srcW / W, srcH / H);
+  const ox = (srcW - W*k) / 2, oy = (srcH - H*k) / 2;
+  return [1/k, 0, -ox/k, 0, 1/k, -oy/k, 0, 0, 1];
+}
+const calKey = () => `folk-phone-cal:${W}x${H}`;
+function setH(M, save) {
+  Hc2d = M; Hd2c = invertH(M);
+  document.getElementById('clearcal').classList.toggle('hidden', !save && !localStorage.getItem(calKey()));
+  if (save) localStorage.setItem(calKey(), JSON.stringify({H: M, srcW, srcH}));
+}
+function loadCal() {
+  try {
+    const c = JSON.parse(localStorage.getItem(calKey()));
+    // Saved H lives in that session's camera pixel space; rescale if it changed.
+    const sx = c.srcW / srcW, sy = c.srcH / srcH;
+    const [a,b,cc,d,e,f,g,h,i] = c.H;
+    setH([a*sx,b*sy,cc, d*sx,e*sy,f, g*sx,h*sy,i], false);
+    document.getElementById('clearcal').classList.remove('hidden');
+    return true;
+  } catch (e) { return false; }
+}
+
+// Tap calibrate, then have all four corner tags in view: each one's center is
+// sampled for a few frames, and the mean centers -> display corners solve H.
+let calMode = null;                              // {samples: {0..3: [pts]}, t0}
+const CAL_SAMPLES = 12;
+function startCal() { calMode = {samples: {0:[],1:[],2:[],3:[]}, t0: performance.now()}; }
+function calProgress() {
+  const got = CAL_CORNER.map((n, i) =>
+    `${n}${calMode.samples[i].length >= CAL_SAMPLES ? '✓' : '·'}`).join(' ');
+  return `calibrating — corner tags in view: ${got}`;
+}
+function calFeed(id, pt) {
+  const s = calMode.samples[id - CAL_BASE];
+  if (s.length < CAL_SAMPLES) s.push(pt);
+  if ([0,1,2,3].every(i => calMode.samples[i].length >= CAL_SAMPLES)) {
+    const mean = i => {
+      const s = calMode.samples[i];
+      return {x: s.reduce((a,p)=>a+p.x,0)/s.length, y: s.reduce((a,p)=>a+p.y,0)/s.length};
+    };
+    const M = solveH([mean(0),mean(1),mean(2),mean(3)],
+                     [{x:0,y:0},{x:W,y:0},{x:W,y:H},{x:0,y:H}]);
+    calMode = null;
+    if (M) setH(M, true);
+  }
+}
+
+// ---- detection -------------------------------------------------------------
+// Detect on a downscaled copy (default 800px wide) at ~12Hz; corners are
+// scaled back to full camera coords before anything uses them.
+const det = document.createElement('canvas'), dctx = det.getContext('2d', {willReadFrequently: true});
+const cards = {};                                // kind -> {x, y, angle, seen}
+const KEEP_MS = 1200;                            // a hand over a tag isn't a lift-off
+let frames = 0, fpsT = 0;
+
+function detectLoop() {
+  const t = performance.now();
+  const ds = Math.min(1, (+qs.get('det') || 800) / srcW);
+  det.width = Math.round(srcW * ds); det.height = Math.round(srcH * ds);
+  dctx.drawImage(src, 0, 0, det.width, det.height);
+  try {
+    markers = detector.detect(dctx.getImageData(0, 0, det.width, det.height));
+  } catch (e) { markers = []; }
+  for (const m of markers) {
+    for (const c of m.corners) { c.x /= ds; c.y /= ds; }
+    const ctr = {x: (m.corners[0].x+m.corners[1].x+m.corners[2].x+m.corners[3].x)/4,
+                 y: (m.corners[0].y+m.corners[1].y+m.corners[2].y+m.corners[3].y)/4};
+    if (m.id >= CAL_BASE) { if (calMode) calFeed(m.id, ctr); continue; }
+    const kind = KINDS[m.id];
+    if (!kind) continue;
+    // The tag's "up" in camera space, mapped through H so a keystoned mount
+    // still yields the right display-space heading (0° = table-up, clockwise).
+    const up = {x: (m.corners[0].x+m.corners[1].x)/2 - (m.corners[3].x+m.corners[2].x)/2,
+                y: (m.corners[0].y+m.corners[1].y)/2 - (m.corners[3].y+m.corners[2].y)/2};
+    const p = applyH(Hc2d, ctr.x, ctr.y);
+    const q = applyH(Hc2d, ctr.x + up.x/2, ctr.y + up.y/2);
+    const angle = (Math.atan2(q.x-p.x, -(q.y-p.y)) * 180/Math.PI + 360) % 360;
+    const prev = cards[kind];
+    if (prev && Math.hypot(prev.x-p.x, prev.y-p.y) < 40) {   // smooth jitter, snap on jumps
+      const d = ((angle - prev.angle + 540) % 360) - 180;
+      cards[kind] = {x: prev.x*.5 + p.x*.5, y: prev.y*.5 + p.y*.5,
+                     angle: (prev.angle + d*.5 + 360) % 360, seen: t};
+    } else {
+      cards[kind] = {x: p.x, y: p.y, angle, seen: t};
+    }
+  }
+  frames++;
+  if (t - fpsT > 1000) { fps = frames; frames = 0; fpsT = t; }
+  setTimeout(detectLoop, 66);
+}
+
+// ---- card positions -> Folk (same pacing rules as table.html) --------------
+let posting = false, lastBody = '', lastPost = 0;
+async function push() {
+  const now = performance.now();
+  const live = Object.entries(cards).filter(([,c]) => now - c.seen < KEEP_MS);
+  const body = JSON.stringify(live.map(([kind, c]) =>
+    ({kind, x: Math.round(c.x), y: Math.round(c.y), angle: Math.round(c.angle)})));
+  if (posting) return;
+  if (body === lastBody && now - lastPost < 1000) return;
+  posting = true; lastBody = body; lastPost = now;
+  try { await fetch('/cards', {method: 'POST', body}); } finally { posting = false; }
+}
+
+// ---- draw wishes <- Folk ---------------------------------------------------
+async function poll() {
+  try { scene = await (await fetch('/scene.json')).json(); sceneOk = true; }
+  catch (e) { sceneOk = false; }
+  setTimeout(poll, 120);
+}
+
+// ---- painting: live video, then the scene mapped display->camera -----------
+// Canvas 2D transforms are affine, so instead of warping the whole layer each
+// scene point is mapped through the inverse homography; circle radii and text
+// scale by the local scale factor at the table's center.
+function draw() {
+  if (srcW) {
+    if (view.width !== srcW) { view.width = srcW; view.height = srcH; }
+    ctx.drawImage(src, 0, 0, srcW, srcH);
+    const mp = (x, y) => applyH(Hd2c, x, y);
+    const o = mp(W/2, H/2), o2 = mp(W/2 + 100, H/2);
+    const s = Math.hypot(o2.x-o.x, o2.y-o.y) / 100;    // local px-per-display-px
+
+    ctx.strokeStyle = '#8fd6a866'; ctx.lineWidth = 2;  // the table's edge
+    ctx.beginPath();
+    [[0,0],[W,0],[W,H],[0,H]].forEach(([x,y], i) => {
+      const p = mp(x, y); i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y);
+    });
+    ctx.closePath(); ctx.stroke();
+
+    const items = scene.items.slice().sort((a,b) => (a.layer||0)-(b.layer||0));
+    for (const it of items) {
+      ctx.strokeStyle = ctx.fillStyle = it.color || 'white';
+      if (it.t === 'poly') {
+        ctx.beginPath();
+        it.pts.forEach((p,i) => { const q = mp(p[0], p[1]); i ? ctx.lineTo(q.x,q.y) : ctx.moveTo(q.x,q.y); });
+        ctx.closePath(); ctx.fill();
+      } else if (it.t === 'line') {
+        ctx.lineWidth = (it.w || 1) * s; ctx.beginPath();
+        it.pts.forEach((p,i) => { const q = mp(p[0], p[1]); i ? ctx.lineTo(q.x,q.y) : ctx.moveTo(q.x,q.y); });
+        ctx.stroke();
+      } else if (it.t === 'circle') {
+        const q = mp(it.c[0][0], it.c[0][1]);
+        ctx.beginPath(); ctx.arc(q.x, q.y, it.r * s, 0, 6.2832);
+        if (it.filled) ctx.fill(); else { ctx.lineWidth = (it.thickness||2) * s; ctx.stroke(); }
+      } else if (it.t === 'text') {
+        const q = mp(it.x, it.y), fs = (it.scale||16) * s;
+        ctx.font = `${fs}px ui-monospace, monospace`;
+        it.text.split('\n').forEach((ln,i) => ctx.fillText(ln, q.x, q.y + i*fs*1.2));
+      }
+    }
+
+    if (showTags || calMode) {
+      for (const m of markers) {
+        const isCal = m.id >= CAL_BASE;
+        ctx.strokeStyle = isCal ? '#e8c05a' : '#5ac8e8'; ctx.lineWidth = 3;
+        ctx.beginPath();
+        m.corners.forEach((c,i) => i ? ctx.lineTo(c.x,c.y) : ctx.moveTo(c.x,c.y));
+        ctx.closePath(); ctx.stroke();
+        ctx.fillStyle = ctx.strokeStyle; ctx.font = '28px ui-monospace, monospace';
+        ctx.fillText(isCal ? CAL_CORNER[m.id-CAL_BASE] : (KINDS[m.id] || `#${m.id}`),
+                     m.corners[0].x, m.corners[0].y - 8);
+      }
+    }
+    const now = performance.now();
+    const live = Object.values(cards).filter(c => now - c.seen < KEEP_MS).length;
+    stat.textContent = calMode ? calProgress() :
+      `${live} cards · ${scene.items.length} wishes${sceneOk ? '' : ' · folk offline?'} · ${fps}fps`;
+  }
+  requestAnimationFrame(draw);
+}
+
+// ---- boot ------------------------------------------------------------------
+async function boot() {
+  const t = await (await fetch('/table.json')).json();
+  [W, H] = t.display;
+  KINDS = t.cards.map(c => c.kind);
+  if (qs.get('img')) {                           // still-image mode (tests, debugging)
+    document.getElementById('start').classList.add('hidden');
+    const im = new Image();
+    im.onload = () => { src = im; srcW = im.naturalWidth; srcH = im.naturalHeight; ready(); };
+    im.src = qs.get('img');
+  }
+}
+async function startCamera() {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: false,
+    video: {facingMode: 'environment', width: {ideal: 1920}, height: {ideal: 1080}}});
+  const v = document.createElement('video');
+  v.playsInline = true; v.muted = true; v.srcObject = stream;
+  await v.play();
+  src = v; srcW = v.videoWidth; srcH = v.videoHeight;
+  document.getElementById('start').classList.add('hidden');
+  try { await navigator.wakeLock.request('screen'); } catch (e) {}
+  ready();
+}
+function ready() {
+  if (!loadCal()) setH(defaultH(), false);
+  detectLoop(); poll(); draw();
+  setInterval(push, 100);
+}
+
+document.getElementById('go').onclick = () =>
+  startCamera().catch(e => alert(`camera failed: ${e.message}\n` +
+    `iOS needs HTTPS — use the https:// address server.py printed and accept the certificate.`));
+document.getElementById('cal').onclick = () => startCal();
+document.getElementById('clearcal').onclick = () => {
+  localStorage.removeItem(calKey()); setH(defaultH(), false);
+  document.getElementById('clearcal').classList.add('hidden');
+};
+document.getElementById('debug').onclick = e => {
+  showTags = !showTags; e.target.classList.toggle('on', showTags); };
+document.getElementById('flip').onclick = e => {
+  view.classList.toggle('flip'); e.target.classList.toggle('on'); };
+view.addEventListener('click', () => {           // bare video for the TV
+  document.getElementById('hud').classList.toggle('hidden');
+  document.getElementById('btns').classList.toggle('hidden');
+});
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && src && src.play) {
+    src.play(); navigator.wakeLock?.request('screen').catch(() => {});
+  }
+});
+
+window.PHONE = {                                 // the tests reach in here
+  get state() { return {W, H, srcW, srcH, Hc2d, cards, markers: markers.length}; },
+  startCal, setH, solveH, applyH,
+};
+boot();
+</script>
