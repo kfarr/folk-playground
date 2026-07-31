@@ -1,28 +1,31 @@
-# bridge.folk — the browser half of the virtual table.
+# bridge.folk — the Folk-side half of the browser table. App-agnostic: which
+# card kind maps to which program comes from harness.folk's manifest claim.
 #
-#   reads  /tmp/folkville-tools.json  (written by server.py from mouse drags)
-#          -> `Claim <card>.folk has quad ...`, i.e. what the camera would say
-#   writes /tmp/folkville-scene.json  (read by the canvas)
-#          <- folkville's draw wishes, i.e. what the projector would show
+#   reads  /tmp/browser-table-cards.json  (written by server.py from mouse drags)
+#          -> `Claim <card program> has quad ...`, i.e. what the camera would say
+#   writes /tmp/browser-table-scene.json  (read by the canvas)
+#          <- the app's draw wishes, i.e. what the projector would show
 #
 # Also prints any program error Folk records, since Folk files errors as
 # statements rather than printing them — a program that "does nothing" is
 # usually a program that threw.
 
-set SCENE "/tmp/folkville-scene.json"
-set TOOLS "/tmp/folkville-tools.json"
+set SCENE "/tmp/browser-table-scene.json"
+set CARDS "/tmp/browser-table-cards.json"
 
 # Turn card positions into quads. This mirrors tags-to-quads.folk: the quads
 # are plain Claims inside a re-evaluated When body, so they retract themselves
 # when the positions change. Holding a separate quad key per card at drag rate
-# instead churns the db hard enough to disrupt the engine loop.
+# instead churns the db hard enough to disrupt other programs.
 #
 # A When body runs in a FRESH interpreter — it cannot see this program's procs
-# or variables — so the quad math is inlined and the directory arrives as a
+# or variables — so the quad math is inlined and the card map arrives as a
 # claim.
-When the folkville directory is /fvdir/ & the virtual table has cards /cards/ {
+When the browser table cards are /kindToProgram/ & \
+     the browser table has cards /cards/ {
     foreach card $cards {
         lassign $card kind cx cy angle
+        if {![dict exists $kindToProgram $kind]} continue
         set a [expr {$angle * 3.14159265358979 / 180.0}]
         set ca [expr {cos($a)}]; set sa [expr {sin($a)}]
         set hw 60.0; set hh 45.0
@@ -36,8 +39,7 @@ When the folkville directory is /fvdir/ & the virtual table has cards /cards/ {
         }
         # Quads are {space {topLeft topRight bottomRight bottomLeft}} in
         # display space — the same shape a printed card's tag produces.
-        Claim [file join $fvdir "folkville-$kind.folk"] has quad \
-            [list "display web" $verts]
+        Claim [dict get $kindToProgram $kind] has quad [list "display web" $verts]
     }
 }
 
@@ -52,13 +54,13 @@ set lastData ""
 
 while true {
     # ---- mouse drags -> card positions (the camera's job) ----------------
-    if {[file exists $TOOLS]} {
+    if {[file exists $CARDS]} {
         catch {
-            set fp [open $TOOLS r]; set data [string trim [read $fp]]; close $fp
+            set fp [open $CARDS r]; set data [string trim [read $fp]]; close $fp
             if {$data ne $lastData} {
                 set lastData $data
-                Hold! -key {virtual table cards} \
-                    Claim the virtual table has cards $data
+                Hold! -key {browser table cards} \
+                    Claim the browser table has cards $data
             }
         }
     }
