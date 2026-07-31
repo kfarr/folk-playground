@@ -28,6 +28,9 @@ set TRAIL_MAX_MS  500  ;# gap larger than this = teleport, no stroke
 set DWELL_MS     1800  ;# crane hold-still time
 set DWELL_SPREAD  0.8  ;# cells
 set RESET_MS     3000
+set RESET_GRACE_MS 900   ;# dropout tolerance — a missed detection frame or a
+                          # competing table client must not zero the 3s timer
+set TOOL_GONE_MS 1000    ;# absence long enough to count as taken off the table
 
 Wish $this is labelled "FOLKVILLE\nengine + renderer"
 
@@ -436,6 +439,7 @@ holdScene
 set toolState [dict create]   ;# per tool page: ema / prev / hist / spent
 set lastSave [clock milliseconds]
 set resetSince 0
+set resetLast 0
 set resetDone 0
 
 while true {
@@ -455,6 +459,14 @@ while true {
         lassign [::folkville::quadCenter $q] x y
 
         set st [dict getdef $toolState $p [dict create]]
+
+        # A card that left the table and came back must snap to its new spot,
+        # not glide from its old one: stale ema would drag the paver across
+        # the map, paving a phantom trail along the way.
+        if {[dict exists $st seen] && $now - [dict get $st seen] > $TOOL_GONE_MS} {
+            set st [dict create]
+        }
+        dict set st seen $now
 
         # EMA smoothing against camera jitter
         if {[dict exists $st ema]} {
@@ -532,8 +544,11 @@ while true {
         dict set toolState $p $st
     }
 
-    # reset card: face-up presence for RESET_MS, once per showing
+    # reset card: face-up presence for RESET_MS, once per showing. Absence
+    # only counts after RESET_GRACE_MS — the card's quad can vanish for a
+    # tick or two without the card moving (detection hiccups, claim churn).
     if {$resetVisible} {
+        set resetLast $now
         if {$resetSince == 0} { set resetSince $now }
         if {!$resetDone && $now - $resetSince > $RESET_MS} {
             set terrain [::folkville::initTerrain $COLS $ROWS]
@@ -541,7 +556,7 @@ while true {
             set resetDone 1
             incr changed
         }
-    } else {
+    } elseif {$resetSince != 0 && $now - $resetLast > $RESET_GRACE_MS} {
         set resetSince 0
         set resetDone 0
     }
